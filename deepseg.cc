@@ -7,6 +7,8 @@
 #include <unistd.h>
 #include <cstdio>
 #include <chrono>
+#include <string>
+
 #include "tensorflow/lite/interpreter.h"
 #include "tensorflow/lite/kernels/register.h"
 #include "tensorflow/lite/model.h"
@@ -20,6 +22,30 @@
 
 #include "loopback.h"
 #include "transpose_conv_bias.h"
+
+int fourCcFromString(const std::string& in)
+{
+	if (in.empty())
+		return 0;
+
+	if (in.size() <= 4)
+	{
+		// fourcc codes are up to 4 bytes long, right-space-padded and upper-case
+		// c.f. http://ffmpeg.org/doxygen/trunk/isom_8c-source.html and
+		// c.f. https://www.fourcc.org/codecs.php
+		std::array<uint8_t, 4> a = {' ', ' ', ' ', ' '};
+		for (auto i = 0; i < in.size(); ++i)
+			a[i] = ::toupper(in[i]);
+		return cv::VideoWriter::fourcc(a[0], a[1], a[2], a[3]);
+	}
+	else if (in.size() == 8)
+	{
+		// Most people seem to agree on 0x47504A4D being the fourcc code of "MJPG", not the literal translation
+		// 0x4D4A5047. This is also what ffmpeg expects.
+		return std::stoi(in, nullptr, 16);
+	}
+	return 0;
+}
 
 // OpenCV helper functions
 cv::Mat convert_rgb_to_yuyv( cv::Mat input ) {
@@ -62,7 +88,7 @@ cv::Mat getTensorMat(int tnum, int debug) {
 	TfLiteIntArray* dims = interpreter->tensor(tnum)->dims;
 	if (debug) for (int i = 0; i < dims->size; i++) printf("tensor #%d: %d\n",tnum,dims->data[i]);
 	TFLITE_MINIMAL_CHECK(dims->data[0] == 1);
-	
+
 	int h = dims->data[1];
 	int w = dims->data[2];
 	int c = dims->data[3];
@@ -143,6 +169,7 @@ int main(int argc, char* argv[]) {
 	timinginfo_t ti;
 	ti.bootns = timestamp();
 	int debug  = 0;
+	bool showProgress = false;
 	int threads= 2;
 	int width  = 640;
 	int height = 480;
@@ -151,6 +178,7 @@ int main(int argc, char* argv[]) {
 	const char *ccam = "/dev/video1";
 	bool flipHorizontal = false;
 	bool flipVertical   = false;
+	int fourcc = 0;
 
 	const char* modelname = "models/segm_full_v679.tflite";
 
@@ -161,6 +189,8 @@ int main(int argc, char* argv[]) {
 			showUsage = true;
 		} else if (strncmp(argv[arg], "-d", 2)==0) {
 			++debug;
+		} else if (strncmp(argv[arg], "-p", 2)==0) {
+			showProgress = true;
 		} else if (strncmp(argv[arg], "-H", 2)==0) {
 			flipHorizontal = !flipHorizontal;
 		} else if (strncmp(argv[arg], "-V", 2)==0) {
@@ -205,6 +235,15 @@ int main(int argc, char* argv[]) {
 			} else {
 				showUsage = true;
 			}
+		} else if (strncmp(argv[arg], "-f", 2)==0) {
+			if (hasArgument) {
+				fourcc = fourCcFromString(argv[++arg]);
+				if (!fourcc) {
+					showUsage = true;
+				}
+			} else {
+				showUsage = true;
+			}
 		} else if (strncmp(argv[arg], "-t", 2)==0) {
 			if (hasArgument && sscanf(argv[++arg], "%d", &threads)) {
 				if (!threads) {
@@ -219,15 +258,17 @@ int main(int argc, char* argv[]) {
 	if (showUsage) {
 		fprintf(stderr, "\n");
 		fprintf(stderr, "usage:\n");
-		fprintf(stderr, "  deepseg [-?] [-d] [-c <capture>] [-v <virtual>] [-w <width>] [-h <height>]\n");
+		fprintf(stderr, "  deepseg [-?] [-d] [-p] [-c <capture>] [-v <virtual>] [-w <width>] [-h <height>]\n");
 		fprintf(stderr, "    [-t <threads>] [-b <background>] [-m <modell>]\n");
 		fprintf(stderr, "\n");
 		fprintf(stderr, "-?            Display this usage information\n");
 		fprintf(stderr, "-d            Increase debug level\n");
+		fprintf(stderr, "-p            Show progress bar\n");
 		fprintf(stderr, "-c            Specify the video source (capture) device\n");
 		fprintf(stderr, "-v            Specify the video target (sink) device\n");
 		fprintf(stderr, "-w            Specify the video stream width\n");
 		fprintf(stderr, "-h            Specify the video stream height\n");
+		fprintf(stderr, "-f            Specify the camera video format, i.e. MJPG or 47504A4D.\n");
 		fprintf(stderr, "-t            Specify the number of threads used for processing\n");
 		fprintf(stderr, "-b            Specify the background image\n");
 		fprintf(stderr, "-m            Specify the TFLite model used for segmentation\n");
@@ -270,6 +311,8 @@ int main(int argc, char* argv[]) {
 
 	cap.set(CV_CAP_PROP_FRAME_WIDTH,  width);
 	cap.set(CV_CAP_PROP_FRAME_HEIGHT, height);
+	if (fourcc)
+		cap.set(CV_CAP_PROP_FOURCC, fourcc);
 	cap.set(CV_CAP_PROP_CONVERT_RGB, true);
 
 	// Load model
@@ -443,7 +486,13 @@ int main(int argc, char* argv[]) {
 		}
 		ti.v4l2ns=timestamp();
 
-		if (!debug) { printf("."); fflush(stdout); continue; }
+		if (!debug) {
+			if (showProgress) {
+				printf(".");
+				fflush(stdout);
+			}
+			continue;
+		}
 
 		// timing details..
 		printf("wait:%9ld lock:%9ld [grab:%9ld retr:%9ld] copy:%9ld open:%9ld tflt:%9ld mask:%9ld post:%9ld v4l2:%9ld ",
@@ -490,4 +539,3 @@ int main(int argc, char* argv[]) {
 	printf("\n");
 	return 0;
 }
-
